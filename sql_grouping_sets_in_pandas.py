@@ -14,14 +14,16 @@ def grouper(df,grpby=None,aggfunc=None):
     ''' produces aggregate DataFrame from DataFrames for non-redundant groupings
         workingdf is used to avoid modifying original DataFrame
     '''
-    uniqcols = (i for i in grpby if len(df[i].unique()) == 1)
-    pwrset = (i for i in powerset(grpby))
-    s = set()
-    for uniqcol in uniqcols:
-        for i in pwrset:
-            if uniqcol in i:
+    #uniqcols = (i for i in grpby if len(df[i].unique()) == 1)
+    #pwrset = (i for i in powerset(grpby))
+    #s = set()
+    uniqcols = set(col for col in grpby if len(df[col].unique()) == 1)
+    s = [cols for cols in powerset(grpby) if not uniqcols.isdisjoint(cols)]
+    #for uniqcol in uniqcols:
+        #for i in pwrset:
+        #    if uniqcol in i:
                 # add level of aggregation only when non-redundant
-                s.add(i) 
+                #s.add(i)
     workingdf = df.copy()
     for idx,i in enumerate(s):
         print('  grouping by: {}'.format(list(i)))
