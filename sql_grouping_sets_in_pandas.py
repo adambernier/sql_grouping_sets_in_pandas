@@ -1,7 +1,7 @@
 import itertools as it
 import pandas as pd
 
-from pandas.util.testing import assert_frame_equal
+from pandas.testing import assert_frame_equal
 
 def powerset(iterable): 
     ''' https://docs.python.org/3/library/itertools.html#itertools-recipes
@@ -13,49 +13,75 @@ def powerset(iterable):
 def grouper(df,grpby=None,aggfunc=None):
     ''' produces aggregate DataFrame from DataFrames for non-redundant groupings
         workingdf is used to avoid modifying original DataFrame
+
+        Optimization: groupings that differ only by unique-value columns produce
+        identical aggregations, so we compute each effective grouping only once.
     '''
-    #uniqcols = (i for i in grpby if len(df[i].unique()) == 1)
-    #pwrset = (i for i in powerset(grpby))
-    #s = set()
     uniqcols = set(col for col in grpby if len(df[col].unique()) == 1)
-    s = [cols for cols in powerset(grpby) if not uniqcols.isdisjoint(cols)]
-    #for uniqcol in uniqcols:
-        #for i in pwrset:
-        #    if uniqcol in i:
-                # add level of aggregation only when non-redundant
-                #s.add(i)
+    uniq_values = {col: df[col].unique()[0] for col in uniqcols}
+    if uniqcols:
+        # Filter to groupings containing at least one unique column
+        s = [cols for cols in powerset(grpby) if not uniqcols.isdisjoint(cols)]
+    else:
+        # No unique columns - use all groupings from powerset
+        s = list(powerset(grpby))
+
+    # Group the groupings by their effective grouping (with unique columns removed)
+    effective_to_groupings = {}
+    for cols in s:
+        effective = tuple(c for c in cols if c not in uniqcols)
+        if effective not in effective_to_groupings:
+            effective_to_groupings[effective] = []
+        effective_to_groupings[effective].append(cols)
+
+    print('  {} groupings reduced to {} aggregations'.format(len(s), len(effective_to_groupings)))
+
     workingdf = df.copy()
-    for idx,i in enumerate(s):
-        print('  grouping by: {}'.format(list(i)))
-        if i != (): 
-            tmp = aggfunc( workingdf.groupby(list(i)) )
+
+    # Perform aggregation once per unique effective grouping
+    agg_results = {}
+    for effective in effective_to_groupings:
+        print('  aggregating by: {}'.format(list(effective)))
+        if effective:
+            agg_results[effective] = aggfunc(workingdf.groupby(list(effective)))
         else:
-            # hack to get output to be a DataFrameGroupBy object:
-            #   insert dummy column on which to group by
-            # old, naive code:
-            #   tmp = aggfunc( workingdf )
+            # Grand total: use dummy column to get DataFrameGroupBy object
             dummycolname = hash(tuple(workingdf.columns.tolist()))
             workingdf[dummycolname] = ''
-            tmp = aggfunc( workingdf.groupby(dummycolname) )
-        # drop the index and add it back
-        if i == (): tmp.reset_index(drop=True,inplace=True)
-        else: tmp.reset_index(inplace=True)
-        for j in grpby: 
-            if j not in tmp: # if column is not in DataFrame add it
-                tmp[j] = '(All)'
-        # new list with all columns including aggregate ones; do this only once
-        if idx == 0:
-            finalcols = grpby[:]
-            addlcols = [k for k in tmp if k not in grpby] # aggregate columns 
-            finalcols.extend(addlcols)
-        # reorder columns 
-        tmp = tmp[finalcols] 
-        # creation of final DataFrame
-        if idx == 0:
-            final = tmp; del tmp
-        else: 
-            final = pd.concat( [final,tmp] ); del tmp
+            agg_results[effective] = aggfunc(workingdf.groupby(dummycolname))
+
+    # Build output rows for each original grouping using cached aggregation results
+    frames = []
+    finalcols = None
+    for effective, groupings in effective_to_groupings.items():
+        base_result = agg_results[effective]
+        if effective == ():
+            base_result = base_result.reset_index(drop=True)
+        else:
+            base_result = base_result.reset_index()
+
+        for cols in groupings:
+            tmp = base_result.copy()
+            # Add unique columns that were in this grouping
+            for col in cols:
+                if col not in tmp.columns:
+                    tmp[col] = uniq_values[col]
+            # Add '(All <Column>s)' for columns not in the grouping
+            for col in grpby:
+                if col not in tmp.columns:
+                    tmp[col] = '(All {}s)'.format(col)
+
+            # Determine final column order once
+            if finalcols is None:
+                finalcols = grpby[:]
+                addlcols = [k for k in tmp.columns if k not in grpby]
+                finalcols.extend(addlcols)
+
+            tmp = tmp[finalcols]
+            frames.append(tmp)
+
     del workingdf
+    final = pd.concat(frames, ignore_index=True)
     final = final.sort_values(by=finalcols)
     final.reset_index(drop=True,inplace=True)
     return final
@@ -70,16 +96,18 @@ def agg(grpbyobj):
     return tmp
 
 if __name__ == '__main__':
-    df = pd.DataFrame({'Area':['a','a','b',],
-                       'Year':[2014,2014,2014,],
-                       'Month':[1,2,3,],
-                       'Total':[4,5,6,],})
+    df = pd.DataFrame({'Area':['a','a','b','b'],
+                       'Year':[2014,2014,2014,2015],
+                       'Month':[1,2,3,4],
+                       'Total':[5,6,7,8],})
     final = grouper(df,grpby=['Area','Year'],aggfunc=agg)
     print(final)
-    # test against expected result 
-    expected = '''{"Area":{"0":"(All)","1":"a","2":"b"},
-                   "Year":{"0":2014,"1":2014,"2":2014},
-                   "Total (n)":{"0":15,"1":9,"2":6}}'''
+    # test against expected result
+    expected = '''{
+        "Area":{"0":"(All Areas)","1":"(All Areas)","2":"(All Areas)","3":"a","4":"a","5":"b","6":"b","7":"b"},
+        "Year":{"0":2014,"1":2015,"2":"(All Years)","3":2014,"4":"(All Years)","5":2014,"6":2015,"7":"(All Years)"},
+        "Total (n)":{"0":18,"1":8,"2":26,"3":11,"4":11,"5":7,"6":8,"7":15}
+    }'''
     testfinal = pd.read_json(expected)
     testfinal = testfinal[final.columns.tolist()] # reorder columns 
     try:
